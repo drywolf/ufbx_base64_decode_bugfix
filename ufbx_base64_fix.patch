@@ -1,0 +1,149 @@
+diff --git forkSrcPrefix/ufbx.c forkDstPrefix/ufbx.c
+index 1edbafa523003e2442394ba7f6d852f3539cf74d..dd672c90b379736795d5a9775bdc0326c18bd4f1 100644
+--- forkSrcPrefix/ufbx.c
++++ forkDstPrefix/ufbx.c
+@@ -11476,6 +11476,71 @@ ufbxi_noinline static void ufbxi_decode_base64(char *dst, const char *src, size_
+ 	}
+ }
+ 
++// source: https://github.com/assimp/assimp/blob/b58afb7b83ed6e27b9dd0554512795f560d6c891/code/AssetLib/FBX/FBXUtil.cpp#L116
++static const uint8_t base64DecodeTable[128] = {
++	255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++	255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++	255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 62, 255, 255, 255, 63,
++	52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 255, 255, 255, 255, 255, 255,
++	255, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
++	15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 255, 255, 255, 255, 255,
++	255, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
++	41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 255, 255, 255, 255, 255
++};
++
++// source: https://github.com/assimp/assimp/blob/b58afb7b83ed6e27b9dd0554512795f560d6c891/code/AssetLib/FBX/FBXUtil.cpp#L127
++uint8_t DecodeBase64_char(char ch)
++{
++	const auto idx = (uint8_t)ch;
++	if (idx > 127)
++		return 255;
++	return base64DecodeTable[idx];
++}
++
++// source: https://github.com/assimp/assimp/blob/b58afb7b83ed6e27b9dd0554512795f560d6c891/code/AssetLib/FBX/FBXUtil.cpp#L135
++size_t ComputeDecodedSizeBase64(const char* in, size_t inLength)
++{
++	if (inLength < 2)
++	{
++		return 0;
++	}
++	const size_t equals = (size_t)(in[inLength - 1] == '=') + (size_t)(in[inLength - 2] == '=');
++	const size_t full_length = (inLength * 3) >> 2; // div by 4
++	if (full_length < equals)
++	{
++		return 0;
++	}
++	return full_length - equals;
++}
++
++// source: https://github.com/assimp/assimp/blob/b58afb7b83ed6e27b9dd0554512795f560d6c891/code/AssetLib/FBX/FBXUtil.cpp#L150
++size_t DecodeBase64(const char* in, size_t inLength, uint8_t* out, size_t maxOutLength)
++{
++	if (maxOutLength == 0 || inLength < 2) {
++		return 0;
++	}
++	const size_t realLength = inLength - (size_t)(in[inLength - 1] == '=') - (size_t)(in[inLength - 2] == '=');
++	size_t dst_offset = 0;
++	int val = 0, valb = -8;
++	for (size_t src_offset = 0; src_offset < realLength; ++src_offset)
++	{
++		const uint8_t table_value = DecodeBase64_char(in[src_offset]);
++		if (table_value == 255)
++		{
++			return 0;
++		}
++		val = (val << 6) + table_value;
++		valb += 6;
++		if (valb >= 0)
++		{
++			out[dst_offset++] = (uint8_t)((val >> valb) & 0xFF);
++			valb -= 8;
++			val &= 0xFFF;
++		}
++	}
++	return dst_offset;
++}
++
+ ufbxi_nodiscard ufbxi_noinline static int ufbxi_read_embedded_blob(ufbxi_context *uc, ufbx_blob *dst_blob, ufbxi_node *node)
+ {
+ 	if (!node) return 1;
+@@ -11488,37 +11553,53 @@ ufbxi_nodiscard ufbxi_noinline static int ufbxi_read_embedded_blob(ufbxi_context
+ 		if (num_parts == 1) {
+ 			content = parts[0];
+ 		} else {
++			// source: https://github.com/assimp/assimp/blob/b58afb7b83ed6e27b9dd0554512795f560d6c891/code/AssetLib/FBX/FBXMaterial.cpp#L305-L339
+ 			size_t total_size = 0;
+ 			ufbxi_for(ufbx_string, part, parts, num_parts) {
+-				total_size += part->length;
++				if (uc->from_ascii) {
++					size_t tokenLength = part->length; // ignore double quotes
++					const char* base64data = part->data;
++					const size_t outLength = ComputeDecodedSizeBase64(base64data, tokenLength);
++					if (outLength == 0) {
++						printf("ERROR: Corrupted embedded content found\n");
++					}
++					total_size += outLength;
++				}
++				else {
++					total_size += part->length;
++				}
+ 			}
++
+ 			ufbxi_buf *dst_buf = uc->from_ascii ? &uc->tmp_parse : &uc->result;
+ 			char *dst = ufbxi_push(dst_buf, char, total_size);
+ 			ufbxi_check(dst);
+ 			content.data = dst;
+ 			content.length = total_size;
+-			ufbxi_for(ufbx_string, part, parts, num_parts) {
+-				memcpy(dst, part->data, part->length);
+-				dst += part->length;
+-			}
+-		}
+ 
+-		if (uc->from_ascii) {
+-			if (content.length % 4 == 0) {
+-				size_t padding = 0;
+-				while (padding < 2 && padding < content.length && content.data[content.length - 1 - padding] == '=') {
+-					padding++;
+-				}
+-
+-				dst_blob->size = content.length / 4 * 3 - padding;
+-				dst_blob->data = ufbxi_push(&uc->result, char, dst_blob->size + 3);
++			if (uc->from_ascii) {
++				// combine ascii/base64 parts
++				dst_blob->size = content.length;
++				dst_blob->data = ufbxi_push(&uc->result, char, total_size);
+ 				ufbxi_check(dst_blob->data);
+ 
+-				ufbxi_decode_base64((char*)dst_blob->data, content.data, content.length);
++				size_t dst_offset = 0;
++				ufbxi_for(ufbx_string, part, parts, num_parts) {
++					size_t tokenLength = part->length; // ignore double quotes
++					const char* base64data = part->data;
++
++					size_t dec_length = DecodeBase64(base64data, tokenLength, (uint8_t*)dst_blob->data + dst_offset, total_size - dst_offset);
++					dst_offset += dec_length;
++				}
++			}
++			else {
++				// combine binary parts
++				ufbxi_for(ufbx_string, part, parts, num_parts) {
++					memcpy(dst, part->data, part->length);
++					dst += part->length;
++				}
++				dst_blob->data = content.data;
++				dst_blob->size = content.length;
+ 			}
+-		} else {
+-			dst_blob->data = content.data;
+-			dst_blob->size = content.length;
+ 		}
+ 	}
+ 
